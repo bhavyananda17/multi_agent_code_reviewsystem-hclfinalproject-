@@ -1,0 +1,9 @@
+{
+  "mcp": {
+    "code-review-agents": {
+      "type": "local",
+      "command": ["dotnet", "run", "--project", "./MultiAgentCodeReview.McpServer"],
+      "enabled": true
+    }
+  }
+}

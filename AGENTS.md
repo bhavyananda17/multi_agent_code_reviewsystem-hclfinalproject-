@@ -32,14 +32,11 @@ If you are unsure about ANYTHING, print: "DECISION NEEDED: <your question>" and 
 
 ```
 MultiAgentCodeReview/
-├── src/
-│   ├── MultiAgentCodeReview.Host/          ← CLI entry point (Program.cs, commands)
-│   ├── MultiAgentCodeReview.Orchestration/ ← PipelineOrchestrator, DI, GitOperationsTool, CodeAnalysisTool
-│   ├── MultiAgentCodeReview.Agents/        ← 8 AutoGen agents (Triage, Security, Logic, Performance,
-│   │                                           Modernization, Synthesis, Documentation, Onboarding)
-│   └── MultiAgentCodeReview.Core/          ← Interfaces, models, prompts, config, rate-limiting infra
-└── tests/
-    └── TestAutoGenApi/                     ← Groq integration scratch project
+├── MultiAgentCodeReview.Host/              ← CLI entry point (Program.cs, commands)
+├── MultiAgentCodeReview.Orchestration/     ← CodeReviewPipeline, DI, GitOperationsTool, CodeAnalysisTool
+├── MultiAgentCodeReview.Agents/            ← 8 AutoGen agents (Triage, Security, Logic, Performance,
+│                                               Modernization, Synthesis, Documentation, Onboarding)
+└── MultiAgentCodeReview.Core/              ← Interfaces, models, prompts, config, rate-limiting infra
 ```
 
 **Existing interfaces OpenCode must know about:**
@@ -54,16 +51,19 @@ MultiAgentCodeReview/
 - `Finding` — individual issue model (severity, file, line, message, agent name)
 - `TriageResult` — output of triage stage
 
-**Existing pipeline stages:**
+**Existing pipeline stages (CodeReviewPipeline.RunReviewAsync):**
 1. Filter → git diff → dependency graph → select relevant files
 2. Triage → LLM classifies changes → routes to specialist agents
 3. Specialists → sequential with 2s delay
 4. Synthesis → merges findings → markdown report
-5. Docs → fire-and-forget
+
+**Separate CLI command (not in pipeline):**
+- Docs → DocumentationAgent.GenerateDocumentationAsync (fire-and-forget)
 
 **Existing CLI commands:**
 - `dotnet run -- review /path/to/repo <commit-hash> [base-commit]`
 - `dotnet run -- ask /path/to/repo "question"` ← stub, not wired
+- `dotnet run -- docs /path/to/repo <commit-hash> [base-commit]`
 
 ---
 
@@ -80,20 +80,20 @@ This project:
 - References `MultiAgentCodeReview.Orchestration` and `MultiAgentCodeReview.Agents`
 - Uses `ModelContextProtocol` NuGet package (official Microsoft/Anthropic SDK)
 - Communicates with OpenCode via **stdio transport only** (no HTTP, no SSE, no ports)
-- Exposes exactly **3 MCP tools** (see Phase 3)
+- Exposes exactly **4 MCP tools** (see Phase 3)
 - Has its own `appsettings.json` for MCP-specific config
 
 ---
 
-## 3. The 3 MCP Tools — Exact Definitions
+## 3. The 4 MCP Tools — Exact Definitions
 
-> ✅ DECIDED: These are the only 3 tools. Do not add more without asking.
+> ✅ DECIDED: These are the only 4 tools. Do not add more without asking.
 
 ### Tool 1: `review_repo`
 ```
 Name:        review_repo
 Description: Run a full multi-agent code review on a git repository.
-             Runs all 5 pipeline stages: filter, triage, specialists, synthesis, docs.
+             Runs all 4 pipeline stages: filter, triage, specialists, synthesis.
              Returns a prioritized markdown findings report.
 Parameters:
   - repo_path    (string, required) — absolute path to the git repo on disk
@@ -125,6 +125,19 @@ Parameters:
 Returns:     string — cached markdown report, or "No report found for this repo."
 ```
 
+### Tool 4: `generate_docs`
+```
+Name:        generate_docs
+Description: Generate project documentation for a codebase.
+             Uses DocumentationAgent to create README, API docs, architecture docs.
+             Use when user asks to generate/update documentation.
+Parameters:
+  - repo_path    (string, required) — absolute path to the git repo on disk
+  - commit_hash  (string, required) — the commit to document (HEAD, sha, branch name)
+  - base_commit  (string, optional) — base to diff against (defaults to commit_hash~1)
+Returns:     string — generated documentation in markdown format
+```
+
 ---
 
 ## 4. Phase Plan — Exact Execution Order
@@ -137,9 +150,9 @@ Returns:     string — cached markdown report, or "No report found for this rep
 ### Phase 1 — Read and Verify (No code written)
 
 OpenCode must:
-1. Read `MultiAgentCodeReview.sln` and list all projects found
-2. Read `MultiAgentCodeReview.Orchestration/PipelineOrchestrator.cs` — print the public method signatures only
-3. Read `MultiAgentCodeReview.Agents/OnboardingAgent.cs` — confirm `AnswerAsync` exists and print its signature
+1. Read `MultiAgentCodeReview.slnx` and list all projects found
+2. Read `MultiAgentCodeReview.Orchestration/Pipeline/CodeReviewPipeline.cs` — print the public method signatures only
+3. Read `MultiAgentCodeReview.Agents/DocumentationAgent.cs` — confirm `AnswerAsync` exists and print its signature
 4. Read `MultiAgentCodeReview.Core/Models/` — list all model classes found
 5. Read `MultiAgentCodeReview.Host/Program.cs` — print how DI is currently configured
 
@@ -147,7 +160,7 @@ Then print:
 ```
 PHASE 1 COMPLETE.
 Found projects: [list]
-PipelineOrchestrator public methods: [list]
+CodeReviewPipeline public methods: [list]
 OnboardingAgent.AnswerAsync signature: [signature]
 Models found: [list]
 DI setup summary: [summary]
@@ -188,7 +201,7 @@ MultiAgentCodeReview.McpServer/
 
 `CodeReviewMcpTools.cs` must:
 - Be a class with `[McpServerToolType]` attribute
-- Have 3 stub methods matching the tool definitions in Section 3
+- Have 4 stub methods matching the tool definitions in Section 3
 - Each stub returns `Task<string>` and just returns `"NOT_IMPLEMENTED"` for now
 - Have `[McpServerTool]` and `[Description("...")]` attributes on each method
 
@@ -208,10 +221,10 @@ Which do you prefer? Type A or B.
 
 ### Phase 3 — Wire Tool 1: `review_repo`
 
-> ⚠️ CONSTRAINT: Do not modify PipelineOrchestrator. Inject it, call it.
+> ⚠️ CONSTRAINT: Do not modify CodeReviewPipeline. Inject it, call it.
 
 OpenCode must:
-1. Inject `PipelineOrchestrator` into `CodeReviewMcpTools` via constructor
+1. Inject `CodeReviewPipeline` into `CodeReviewMcpTools` via constructor
 2. Implement `review_repo` to:
    - Build a `PipelineContext` from `repo_path`, `commit_hash`, `base_commit`
    - Call the orchestrator's existing run method (exact method name from Phase 1 discovery)
@@ -271,12 +284,32 @@ OpenCode must:
 
 After implementing, print:
 ```
-PHASE 5 COMPLETE. All 3 tools implemented.
+PHASE 5 COMPLETE.
 ```
 
 ---
 
-### Phase 6 — OpenCode Config
+### Phase 6 — Wire Tool 4: `generate_docs`
+
+> ⚠️ CONSTRAINT: DocumentationAgent.GenerateDocumentationAsync is already implemented. Call it exactly as-is.
+
+OpenCode must:
+1. Inject `AgentFactory` into `CodeReviewMcpTools` (already available from Phase 3)
+2. Implement `generate_docs` to:
+   - Build a `PipelineContext` from `repo_path`, `commit_hash`, `base_commit`
+   - Call `RunReviewAsync()` to get `ReviewOutput` (needed for synthesis result)
+   - Create `DocumentationAgent` via `_agentFactory.CreateDocumentationAgent()`
+   - Call `docAgent.GenerateDocumentationAsync(context, result)`
+   - Return the documentation string
+
+After implementing, print:
+```
+PHASE 6 COMPLETE. All 4 tools implemented.
+```
+
+---
+
+### Phase 7 — OpenCode Config
 
 > ✅ DECIDED: Generate the opencode.json snippet and a README section.
 
@@ -302,12 +335,12 @@ OpenCode must create:
 **`MCP_SETUP.md`** — a short setup guide:
 - How to add to opencode.json
 - How to test the server starts: `dotnet run --project MultiAgentCodeReview.McpServer`
-- Example OpenCode prompts for each of the 3 tools
+- Example OpenCode prompts for each of the 4 tools
 - Note about Groq rate limits (1000 RPD, 8 agents per review = ~125 reviews/day)
 
 After creating both files, print:
 ```
-PHASE 6 COMPLETE.
+PHASE 7 COMPLETE.
 
 🔴 DECISION REQUIRED — Final check before done:
 I have not run the project yet. Should I:
@@ -332,7 +365,7 @@ Type A or B.
 ❌ Never invent method signatures — read the actual source first (Phase 1)
 ❌ Never hardcode API keys in any file
 ❌ Never add HTTP endpoints — stdio only
-❌ Never modify PipelineOrchestrator.cs, any Agent class, or any Core model
+❌ Never modify CodeReviewPipeline.cs, any Agent class, or any Core model
 ❌ Never run dotnet run without being asked to in a DECISION REQUIRED block
 ```
 
@@ -348,10 +381,10 @@ Type A or B.
 - The correct NuGet package name is `ModelContextProtocol` — verify with `dotnet add package ModelContextProtocol --dry-run`
 - Transport registration: `.WithStdioServerTransport()` — verify this method exists in the version you install
 
-**PipelineOrchestrator:**
-- Do not assume the method is called `RunAsync` — read it in Phase 1
-- Do not assume `PipelineContext` constructor parameters — read the actual model in Phase 1
-- Do not assume `OnboardingAgent` is registered as `IOnboardingAgent` in DI — check Program.cs
+**CodeReviewPipeline:**
+- Do not assume the method is called `RunAsync` — it's `RunReviewAsync`
+- Do not assume `PipelineContext` constructor parameters — it's a record with named parameters
+- Do not assume `OnboardingAgent` is registered as `IOnboardingAgent` in DI — it's created via `AgentFactory.CreateOnboardingAgent()`
 
 **OpenCode config:**
 - The correct config key is `"mcp"` not `"mcpServers"` (that's Claude Desktop format)
@@ -375,6 +408,7 @@ Type A or B.
 - Your `review_repo` tool IS the orchestrator call — it fans out to all 8 agents
 - Your `ask_codebase` tool is equivalent to Claude Code's Guide agent pattern
 - Your `get_last_report` tool is equivalent to Claude Code's read-only Explore agent pattern
+- Your `generate_docs` tool is a specialized task agent for documentation generation
 - If OpenCode calls `review_repo` and it fails partway through, it should return partial results
   with a clear error note — not crash the MCP server process
 
@@ -395,7 +429,7 @@ For your records, here are all the DECISION REQUIRED stops in order:
 | 2 | Phase 2 | How to share DI setup between Host and McpServer? | A (copy) / B (extract) |
 | 3 | Phase 3 | Should reports also be written to disk? | YES / NO |
 | 4 | Phase 4 | How to handle Roslyn analysis cost for ask_codebase? | A (always fresh) / B (cache) |
-| 5 | Phase 6 | Should I run dotnet build to verify? | A (run build) / B (stop here) |
+| 5 | Phase 7 | Should I run dotnet build to verify? | A (run build) / B (stop here) |
 
 ---
 
@@ -407,7 +441,7 @@ The MCP server transformation is complete when:
 - [ ] `dotnet run --project MultiAgentCodeReview.McpServer` starts without crashing
 - [ ] `opencode.snippet.json` exists and has the correct OpenCode config format
 - [ ] `MCP_SETUP.md` exists with setup instructions
-- [ ] All 3 tools return real data (not `"NOT_IMPLEMENTED"`)
+- [ ] All 4 tools return real data (not `"NOT_IMPLEMENTED"`)
 - [ ] No existing project files were modified
 - [ ] No new packages were added without being listed in this file or explicitly approved
 
